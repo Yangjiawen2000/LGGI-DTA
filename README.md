@@ -1,79 +1,98 @@
-# Resources:
+# LGGI-DTA: LLM-Guided Graph Interaction for Drug–Target Affinity Prediction
 
-+ README.md: this file.
-+ data/davis/folds/test_fold_setting1.txt,train_fold_setting1.txt; data/davis/Y,ligands_can.txt,proteins.txt
-  data/kiba/folds/test_fold_setting1.txt,train_fold_setting1.txt; data/kiba/Y,ligands_can.txt,proteins.txt
-  These file were downloaded from https://github.com/hkmztrk/DeepDTA/tree/master/data
+[![GitHub](https://img.shields.io/badge/GitHub-LGGI--DTA-blue?logo=github)](https://github.com/Yangjiawen2000/LGGI-DTA)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.2+-red?logo=pytorch)](https://pytorch.org/)
 
-###  Source codes:
-+ create_data.py: create data in pytorch format
-+ utils.py: include TestbedDataset used by create_data.py to create data, and performance measures.
-+ training.py: train a GraphDTA model.
-+ models/ginconv.py, gat.py, gat_gcn.py, and gcn.py: proposed models GINConvNet, GATNet, GAT_GCN, and GCNNet receiving graphs as input for drugs.
+LGGI-DTA 是一个基于“机制级融合（Mechanism-level Fusion）”理念开发的药物-靶点亲和力（DTA）预测模型。它打破了传统模型中仅在最后阶段进行特征拼接（Late Fusion）的局限，通过引入预训练蛋白质大语言模型（Protein LLM, 如 ESM-2），在图神经网络（GNN）的底层消息传递（Message Passing）过程中实现结构信息与语义信息的深度交互。
 
-# Step-by-step running:
+---
 
-## 0. Install Python libraries needed
-+ Install pytorch_geometric following instruction at https://github.com/rusty1s/pytorch_geometric
-+ Install rdkit: conda install -y -c conda-forge rdkit
-+ Or run the following commands to install both pytorch_geometric and rdkit:
-```
-conda create -n geometric python=3
-conda activate geometric
+## 🌟 核心创新点
+
+1.  **LLM-Guided Graph Interaction (LGGI) 机制**：利用蛋白质大模型的语义编码作为门控信号（Gating Signal），动态调制药物分子图中原子间的信息流动。
+2.  **原子-残基级交互 (Atom-Residue Cross-Attention)**：通过 Cross-Attention 机制，让每一个原子能够“按需关注”蛋白质特定的残基片段，生成个性化的引导信号。
+3.  **深度机制融合**：将交互过程从“预测头之前的特征拼接”提前到“特征提取过程中的动态干预”，显著提升了模型对复杂结合模式的建模能力。
+4.  **原生硬件优化**：完美适配 Apple M系列芯片 (MPS)，并在底层算子层面做了 CPU 后备兼容处理，确保在 macOS 和 Linux/GPU 环境下均能稳定高效运行。
+
+---
+
+## 🛠 环境配置
+
+建议使用 Conda 创建环境：
+
+```bash
+# 创建环境
+conda create -n geometric2 python=3.10
+conda activate geometric2
+
+# 安装必要的库
 conda install -y -c conda-forge rdkit
-conda install pytorch torchvision cudatoolkit -c pytorch
-pip install torch-scatter==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-sparse==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-cluster==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-spline-conv==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-geometric
-
+pip install torch torch-geometric transformers tqdm pandas numpy scipy accelerate
 ```
 
-## 1. Create data in pytorch format
-Running
-```sh
-conda activate geometric
+---
+
+## 🚀 启动流程
+
+### 1. 数据集构建
+系统支持 Davis 和 KIBA 数据集。首先需要使用 ESM 模型提取蛋白质的残基级特征并构建分子图。
+
+```bash
+# 如果在国内环境，建议设置镜像
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 运行数据构建脚本
 python create_data.py
 ```
-This returns kiba_train.csv, kiba_test.csv, davis_train.csv, and davis_test.csv, saved in data/ folder. These files are in turn input to create data in pytorch format,
-stored at data/processed/, consisting of  kiba_train.pt, kiba_test.pt, davis_train.pt, and davis_test.pt.
+*该脚本会自动下载 ESM-2 (8M) 模型（轻量级，适合本地运行），并生成 `.pt` 文件存储在 `data/processed/` 目录下。*
 
-## 2. Train a prediction model
-To train a model using training data. The model is chosen if it gains the best MSE for testing data.  
-Running 
+### 2. 模型训练
+指定数据集索引启动训练（0 为 Davis，1 为 KIBA）。
 
-```sh
-conda activate geometric
-python training.py 0 0 0
+```bash
+# 训练 Davis 数据集上的 LGGI-DTA 模型
+python training.py 0
+```
+*默认优先使用 `mps` (macOS) 或 `cuda` (GPU) 加速。*
+
+### 3. 消融实验与验证
+项目中已预置了多组对照模型，用于验证创新点的有效性：
+- `models/gnn_only.py`: 仅使用分子的图结构信息。
+- `models/gnn_llm_concat.py`: 使用传统的后期特征拼接方法。
+
+支持 80/20 比例的训练/验证划分：
+```bash
+python training_validation.py 0
 ```
 
-where the first argument is for the index of the datasets, 0/1 for 'davis' or 'kiba', respectively;
- the second argument is for the index of the models, 0/1/2/3 for GINConvNet, GATNet, GAT_GCN, or GCNNet, respectively;
- and the third argument is for the index of the cuda, 0/1 for 'cuda:0' or 'cuda:1', respectively. 
- Note that your actual CUDA name may vary from these, so please change the following code accordingly:
-```sh
-cuda_name = "cuda:0"
-if len(sys.argv)>3:
-    cuda_name = "cuda:" + str(int(sys.argv[3])) 
-```
+---
 
-This returns the model and result files for the modelling achieving the best MSE for testing data throughout the training.
-For example, it returns two files model_GATNet_davis.model and result_GATNet_davis.csv when running GATNet on Davis data.
+## 📂 文件结构说明
 
-## 3. Train a prediction model with validation 
+- `models/`
+    - `lggi_dta.py`: 主模型代码库。
+    - `gnn_only.py` / `gnn_llm_concat.py`: 消融实验对照模型。
+- `lggi_layer.py`: 核心 LGGI 层实现（含 Cross-Attention 逻辑）。
+- `utils.py`: 数据加载库、ESM 特征提取（含缓存机制）及 5 大评估指标实现。
+- `create_data.py`: 数据预处理流水线。
+- `training.py`: 标准训练入口。
+- `training_validation.py`: 带验证集划分的优选训练入口。
 
-In "3. Train a prediction model", a model is trained on training data and chosen when it gains the best MSE for testing data.
-This follows how a model was chosen in https://github.com/hkmztrk/DeepDTA. The result by two ways of training is comparable though.
+---
 
-In this section, a model is trained on 80% of training data and chosen if it gains the best MSE for validation data, 
-which is 20% of training data. Then the model is used to predict affinity for testing data.
+## 📊 评估指标
+模型在每次训练后会自动计算并保存以下 5 个关键指标：
+- **MSE** (Mean Squared Error)
+- **RMSE** (Root Mean Squared Error)
+- **Pearson** (Correlation Coefficient)
+- **Spearman** (Correlation Coefficient)
+- **CI** (Concordance Index)
 
-Same arguments as in "3. Train a prediction model" are used. E.g., running 
+---
 
-```sh
-python training_validation.py 0 0 0
-```
+## 📬 引用与联系
+如果您在研究中使用了本项目，请查阅相关论文或在 GitHub 提交 Issue 进行讨论。
 
-This returns the model achieving the best MSE for validation data throughout the training and performance results of the model on testing data.
-For example, it returns two files model_GATNet_davis.model and result_GATNet_davis.csv when running GATNet on Davis data.
+**项目负责人**: Yangjiawen2000
+**Repository**: [LGGI-DTA](https://github.com/Yangjiawen2000/LGGI-DTA)
