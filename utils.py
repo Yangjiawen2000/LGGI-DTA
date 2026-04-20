@@ -32,8 +32,8 @@ def get_esm_embedding(sequence):
         
     if _esm_model is None:
         from transformers import EsmTokenizer, EsmModel
-        # 检测设备优先分配给Apple Silicon(mps)，再降级为cuda或cpu
-        _esm_device = torch.device('mps' if torch.backends.mps.is_available() else ('cuda' if torch.cuda.is_available() else 'cpu'))
+        # 检测设备优先分配给CUDA (GPU)，再降级为cpu
+        _esm_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Loading ESM model facebook/esm2_t6_8M_UR50D to device: {_esm_device} ...")
         _esm_tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
         _esm_model = EsmModel.from_pretrained("facebook/esm2_t6_8M_UR50D").to(_esm_device)

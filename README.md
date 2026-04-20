@@ -23,13 +23,15 @@ LGGI-DTA 是一个基于“机制级融合（Mechanism-level Fusion）”理念�
 
 ```bash
 # 创建环境
-conda create -n geometric2 python=3.10
-conda activate geometric2
+conda create -n lggi_dta python=3.10
+conda activate lggi_dta
 
 # 安装必要的库
 conda install -y -c conda-forge rdkit
-pip install torch torch-geometric transformers tqdm pandas numpy scipy accelerate
+pip install -r requirements.txt
 ```
+
+对于 AutoDL RTX5090 服务器，确保 PyTorch 支持 CUDA 11.8+。
 
 ---
 

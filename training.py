@@ -1,5 +1,5 @@
 import os
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # MPS 不支持的算子自动降级到 CPU
+# Removed MPS fallback for Linux environment
 
 import numpy as np
 import pandas as pd
@@ -81,10 +81,8 @@ model_st = modeling.__name__
 # 数据集选择：0=davis, 1=kiba
 datasets = [['davis','kiba'][int(sys.argv[1])]]
 
-# 设备自适应：MPS (Apple Silicon) > CUDA (GPU) > CPU
-if torch.backends.mps.is_available():
-    device = torch.device('mps')
-elif torch.cuda.is_available():
+# 设备自适应：CUDA (GPU) > CPU
+if torch.cuda.is_available():
     cuda_name = "cuda:0"
     if len(sys.argv)>2:
         cuda_name = "cuda:" + str(int(sys.argv[2]))

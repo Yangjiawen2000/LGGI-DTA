@@ -1,0 +1,9 @@
+torch>=2.2.0
+torch-geometric
+transformers
+tqdm
+pandas
+numpy
+scipy
+accelerate
+rdkit
