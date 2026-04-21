@@ -68,7 +68,8 @@ class LGGILayer(MessagePassing):
 
     def _cross_attention(self, x_proj, protein_tokens, batch):
         """
-        Atom-Residue Cross-Attention：每个原子节点选择性地关注蛋白质的不同残基区域。
+        Atom-Residue Multi-Head Cross-Attention：
+        每个原子节点并行通过多个头关注蛋白质的不同残基区域。
         
         参数:
             x_proj (Tensor): 投影后的原子特征。
@@ -82,36 +83,45 @@ class LGGILayer(MessagePassing):
             guidance (Tensor): 每个原子独有的蛋白引导信号。
                                Shape: [num_nodes, out_channels]
         """
+        num_nodes = x_proj.size(0)
         K = protein_tokens.size(1)  # 蛋白 token 数量 (=32)
+        H = self.num_heads
+        D = self.out_channels
+        head_dim = D // H
         
         # 第一步：将图级蛋白 token 广播到对应的原子节点
         # protein_per_node shape: [num_nodes, K, protein_dim]
         protein_per_node = protein_tokens[batch]
         
-        # 第二步：计算 Query / Key / Value
-        # Q shape: [num_nodes, out_channels]
-        Q = self.W_q(x_proj)
-        # K_mat shape: [num_nodes, K, out_channels]
-        K_mat = self.W_k(protein_per_node)
-        # V_mat shape: [num_nodes, K, out_channels]
-        V_mat = self.W_v(protein_per_node)
+        # 第二步：计算 Q / K / V 并切分为多头
+        # Q: [num_nodes, D] -> [num_nodes, H, 1, head_dim]
+        Q = self.W_q(x_proj).view(num_nodes, H, 1, head_dim)
         
-        # 第三步：计算注意力分数
-        # Q 扩展: [num_nodes, out_channels] → [num_nodes, 1, out_channels]
-        # attention_scores = Q @ K^T → [num_nodes, 1, K]
-        attn_scores = torch.bmm(Q.unsqueeze(1), K_mat.transpose(1, 2)) * self.scale
-        # attn_weights shape: [num_nodes, 1, K]
+        # K_mat/V_mat: [num_nodes, K, D] -> [num_nodes, H, K, head_dim]
+        K_mat = self.W_k(protein_per_node).view(num_nodes, K, H, head_dim).transpose(1, 2)
+        V_mat = self.W_v(protein_per_node).view(num_nodes, K, H, head_dim).transpose(1, 2)
+        
+        # 第三步：计算多头注意力分数
+        # attn_scores = (Q @ K^T) / sqrt(dk) -> [num_nodes, H, 1, K]
+        attn_scores = torch.matmul(Q, K_mat.transpose(-1, -2)) * self.scale
+        
+        # attn_weights shape: [num_nodes, H, 1, K]
         attn_weights = F.softmax(attn_scores, dim=-1)
         
-        # 第四步：加权聚合 Value
-        # context = attn_weights @ V → [num_nodes, 1, out_channels]
-        context = torch.bmm(attn_weights, V_mat)
-        # 去除中间维度 → [num_nodes, out_channels]
-        guidance = self.attn_proj(context.squeeze(1))
+        # 第四步：加权聚合 Value 并拼接多头
+        # context: [num_nodes, H, 1, head_dim]
+        context = torch.matmul(attn_weights, V_mat)
         
-        # P2: 缓存 attention_weights 用于可解释性分析
+        # Reshape & Concat: [num_nodes, D]
+        context = context.squeeze(2).reshape(num_nodes, D)
+        
+        # 第五步：最终投影
+        guidance = self.attn_proj(context)
+        
+        # P2: 缓存 attention_weights (包含所有头) 用于可解释性分析
         if self.return_attention:
-            self._last_attn_weights = attn_weights.squeeze(1).detach()
+            # 缓存为 [num_nodes, H, K]
+            self._last_attn_weights = attn_weights.squeeze(2).detach()
         
         return guidance
 

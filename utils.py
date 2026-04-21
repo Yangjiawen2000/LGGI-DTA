@@ -79,11 +79,11 @@ class TestbedDataset(InMemoryDataset):
         self.dataset = dataset
         if os.path.isfile(self.processed_paths[0]):
             print('Pre-processed data found: {}, loading ...'.format(self.processed_paths[0]))
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
         else:
             print('Pre-processed data {} not found, doing pre-processing...'.format(self.processed_paths[0]))
             self.process(xd, xt, xt_seq, y,smile_graph)
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
