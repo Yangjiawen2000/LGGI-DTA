@@ -5,6 +5,49 @@ from scipy import stats
 from torch_geometric.data import InMemoryDataset, DataLoader
 from torch_geometric import data as DATA
 import torch
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import MolFromSmiles
+import networkx as nx
+
+# Functions from create_data.py
+def atom_features(atom):
+    return np.array(one_of_k_encoding_unk(atom.GetSymbol(),['C', 'N', 'O', 'S', 'F', 'Si', 'P', 'Cl', 'Br', 'Mg', 'Na','Ca', 'Fe', 'As', 'Al', 'I', 'B', 'V', 'K', 'Tl', 'Yb','Sb', 'Sn', 'Ag', 'Pd', 'Co', 'Se', 'Ti', 'Zn', 'H','Li', 'Ge', 'Cu', 'Au', 'Ni', 'Cd', 'In', 'Mn', 'Zr','Cr', 'Pt', 'Hg', 'Pb', 'Unknown']) +
+                    one_of_k_encoding(atom.GetDegree(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
+                    one_of_k_encoding_unk(atom.GetTotalNumHs(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
+                    one_of_k_encoding_unk(atom.GetImplicitValence(), [0, 1, 2, 3, 4, 5, 6,7,8,9,10]) +
+                    [atom.GetIsAromatic()])
+
+def one_of_k_encoding(x, allowable_set):
+    if x not in allowable_set:
+        raise Exception("input {0} not in allowable set{1}:".format(x, allowable_set))
+    return list(map(lambda s: x == s, allowable_set))
+
+def one_of_k_encoding_unk(x, allowable_set):
+    """Maps inputs not in the allowable set to the last element."""
+    if x not in allowable_set:
+        x = allowable_set[-1]
+    return list(map(lambda s: x == s, allowable_set))
+
+def smile_to_graph(smile):
+    mol = Chem.MolFromSmiles(smile)
+    
+    c_size = mol.GetNumAtoms()
+    
+    features = []
+    for atom in mol.GetAtoms():
+        feature = atom_features(atom)
+        features.append( feature / sum(feature) )
+
+    edges = []
+    for bond in mol.GetBonds():
+        edges.append([bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()])
+    g = nx.Graph(edges).to_directed()
+    edge_index = []
+    for e1, e2 in g.edges:
+        edge_index.append([e1, e2])
+        
+    return c_size, features, edge_index
 
 # --- ESM Cache and Global Variables ---
 ESM_CACHE = {}
@@ -32,8 +75,8 @@ def get_esm_embedding(sequence):
         
     if _esm_model is None:
         from transformers import EsmTokenizer, EsmModel
-        # 检测设备优先分配给CUDA (GPU)，再降级为cpu
-        _esm_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # 检测设备优先分配给CPU for ESM (to avoid CUDA issues)
+        _esm_device = torch.device('cpu')
         print(f"Loading ESM model facebook/esm2_t6_8M_UR50D to device: {_esm_device} ...")
         _esm_tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
         _esm_model = EsmModel.from_pretrained("facebook/esm2_t6_8M_UR50D").to(_esm_device)
@@ -79,11 +122,11 @@ class TestbedDataset(InMemoryDataset):
         self.dataset = dataset
         if os.path.isfile(self.processed_paths[0]):
             print('Pre-processed data found: {}, loading ...'.format(self.processed_paths[0]))
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
         else:
             print('Pre-processed data {} not found, doing pre-processing...'.format(self.processed_paths[0]))
-            self.process(xd, xt, xt_seq, y,smile_graph)
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.process()
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
@@ -106,12 +149,23 @@ class TestbedDataset(InMemoryDataset):
             os.makedirs(self.processed_dir)
 
     # Customize the process method to fit the task of drug-target affinity prediction
-    # Inputs:
-    # XD - list of SMILES, XT: list of encoded target (categorical or one-hot),
-    # XT_SEQ - list of raw protein sequences
-    # Y: list of labels (i.e. affinity)
-    # Return: PyTorch-Geometric format processed data
-    def process(self, xd, xt, xt_seq, y, smile_graph):
+    # Load data from CSV and process
+    def process(self):
+        # Load data from CSV
+        df = pd.read_csv(os.path.join(self.root, self.dataset + '.csv'))
+        xd = df['compound_iso_smiles'].tolist()
+        xt_seq = df['target_sequence'].tolist()
+        y = df['affinity'].tolist()
+        
+        # Encode targets (simple index for now)
+        all_prots = list(set(xt_seq))
+        xt = [all_prots.index(seq) for seq in xt_seq]
+        
+        # Build smile_graph
+        smile_graph = {}
+        for smiles in set(xd):
+            smile_graph[smiles] = smile_to_graph(smiles)
+        
         assert (len(xd) == len(xt) and len(xt) == len(y)), "The three lists must be the same length!"
         data_list = []
         data_len = len(xd)
