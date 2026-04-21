@@ -4,16 +4,16 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.2+-red?logo=pytorch)](https://pytorch.org/)
 
-LGGI-DTA 是一个基于“机制级融合（Mechanism-level Fusion）”理念开发的药物-靶点亲和力（DTA）预测模型。它打破了传统模型中仅在最后阶段进行特征拼接（Late Fusion）的局限，通过引入预训练蛋白质大语言模型（Protein LLM, 如 ESM-2），在图神经网络（GNN）的底层消息传递（Message Passing）过程中实现结构信息与语义信息的深度交互。
+LGGI-DTA 是一个基于“机制级融合（Mechanism-level Fusion）”理念开发的药物-靶点亲和力（DTA）预测模型。它通过引入预训练蛋白质大语言模型（Protein LLM, 如 ESM-2），在图神经网络（GNN）的底层消息传递（Message Passing）过程中实现结构信息与语义信息的深度交互。
 
 ---
 
 ## 🌟 核心创新点
 
 1.  **LLM-Guided Graph Interaction (LGGI) 机制**：利用蛋白质大模型的语义编码作为门控信号（Gating Signal），动态调制药物分子图中原子间的信息流动。
-2.  **原子-残基级交互 (Atom-Residue Cross-Attention)**：通过 Cross-Attention 机制，让每一个原子能够“按需关注”蛋白质特定的残基片段，生成个性化的引导信号。
+2.  **原子-残基级多头交互 (Multi-head Cross-Attention)**：【最新更新】引入 4 头 Cross-Attention 机制。不同注意力头可并行捕捉蛋白质残基序列中不同尺度的空间特征，让每个原子能够更精准地“按需关注”结合口袋的关键区域。
 3.  **深度机制融合**：将交互过程从“预测头之前的特征拼接”提前到“特征提取过程中的动态干预”，显著提升了模型对复杂结合模式的建模能力。
-4.  **原生硬件优化**：完美适配 Apple M系列芯片 (MPS)，并在底层算子层面做了 CPU 后备兼容处理，确保在 macOS 和 Linux/GPU 环境下均能稳定高效运行。
+4.  **原生硬件优化与兼容性**：完美适配 Apple M系列芯片 (MPS)，支持 Linux/GPU 环境。已优化适配 PyTorch 2.6+ 数据加载安全协议。
 
 ---
 
@@ -49,37 +49,41 @@ python create_data.py
 ```
 *该脚本会自动下载 ESM-2 (8M) 模型（轻量级，适合本地运行），并生成 `.pt` 文件存储在 `data/processed/` 目录下。*
 
-### 2. 模型训练
+### 2. 标准训练
 指定数据集索引启动训练（0 为 Davis，1 为 KIBA）。
 
 ```bash
 # 训练 Davis 数据集上的 LGGI-DTA 模型
 python training.py 0
 ```
-*默认优先使用 `mps` (macOS) 或 `cuda` (GPU) 加速。*
 
-### 3. 消融实验与验证
-项目中已预置了多组对照模型，用于验证创新点的有效性：
-- `models/gnn_only.py`: 仅使用分子的图结构信息。
-- `models/gnn_llm_concat.py`: 使用传统的后期特征拼接方法。
+### 3. 消融实验 (Ablation Study)
+我们提供了一个自动化的实验脚本 `training_ablation.py`，用于对比不同架构的性能。
 
-支持 80/20 比例的训练/验证划分：
+支持的模型类型 (`--model`):
+- `lggi_dta`: 完整模型（含多头 Cross-Attention）。
+- `gnn_only`: 仅使用分子图信息（不含蛋白特征）。
+- `gnn_llm_concat`: 传统的后期特征拼接方法。
+
+运行示例：
 ```bash
-python training_validation.py 0
+# 在 Davis 数据集上运行消融对比
+python training_ablation.py 0 --model lggi_dta --epochs 1000
 ```
+*运行结束后，脚本会自动读取所有已完成实验的结果，并打印一份整洁的 **Performance Comparison Table**。*
 
 ---
 
 ## 📂 文件结构说明
 
 - `models/`
-    - `lggi_dta.py`: 主模型代码库。
-    - `gnn_only.py` / `gnn_llm_concat.py`: 消融实验对照模型。
-- `lggi_layer.py`: 核心 LGGI 层实现（含 Cross-Attention 逻辑）。
-- `utils.py`: 数据加载库、ESM 特征提取（含缓存机制）及 5 大评估指标实现。
-- `create_data.py`: 数据预处理流水线。
+    - `lggi_dta.py`: 主模型架构（集成了多头注意力机制）。
+    - `gnn_only.py` / `gnn_llm_concat.py`: 对照模型实现。
+- `lggi_layer.py`: 核心 LGGI 层实现（多头 Cross-Attention 逻辑）。
+- `utils.py`: 数据加载库、ESM 特征提取（含缓存）及指标计算。
+- `training_ablation.py`: 【新增】自动化消融实验与结果汇总脚本。
 - `training.py`: 标准训练入口。
-- `training_validation.py`: 带验证集划分的优选训练入口。
+- `create_data.py`: 数据预处理流水线。
 
 ---
 
