@@ -7,11 +7,8 @@ import torch
 import torch.nn as nn
 from utils import *
 
-# 设备自适应逻辑
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-if torch.backends.mps.is_available():
-    device = torch.device('mps')
-elif torch.cuda.is_available():
+# 设备自适应逻辑（服务器环境：优先 CUDA）
+if torch.cuda.is_available():
     device = torch.device('cuda:0')
 else:
     device = torch.device('cpu')
