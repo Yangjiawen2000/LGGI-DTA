@@ -47,6 +47,8 @@ class LGGILayer(MessagePassing):
         
         # attention 输出后的投影层
         self.attn_proj = nn.Linear(out_channels, out_channels)
+        # Cross-Attention 残差后的层归一化
+        self.attn_norm = nn.LayerNorm(out_channels)
         
         # ====== 门控信号生成网络 ======
         # 输入: 拼接的 [邻居节点特征, cross-attention 生成的蛋白引导信号]
@@ -143,21 +145,27 @@ class LGGILayer(MessagePassing):
             Tensor: 更新后的节点特征。
                     Shape: [num_nodes, out_channels]
         """
-        # 第一步：投射原子节点特征到隐空间
-        # x_proj shape: [num_nodes, out_channels]
+        # 1) 投射节点特征到统一隐空间，确保与 attention 输出维度对齐
+        # x_proj: [num_nodes, out_channels]
         x_proj = self.lin_x(x)
-        
-        # 第二步：Atom-Residue Cross-Attention → 每个原子获得个性化蛋白引导信号
-        # guidance shape: [num_nodes, out_channels]
-        guidance = self._cross_attention(x_proj, protein_tokens, batch)
-        
-        # 第三步：驱动 PyG 消息传递，同时传递引导信号
-        # out shape: [num_nodes, out_channels]
-        out = self.propagate(edge_index, x=x_proj, g=guidance)
-        
-        # 第四步：残差更新
-        # final shape: [num_nodes, out_channels]
-        return self.update_net(out) + x_proj
+
+        # 2) Atom-Residue Cross-Attention 生成蛋白引导特征
+        # attn_out(guidance): [num_nodes, out_channels]
+        attn_out = self._cross_attention(x_proj, protein_tokens, batch)
+
+        # 3) 严格执行 Residual + LayerNorm
+        #    x_attn = LayerNorm(x_proj + attn_out)
+        #    这里使用 x_proj 做残差支路，避免第一层 in_channels != out_channels 时形状不匹配
+        x_attn = self.attn_norm(x_proj + attn_out)
+
+        # 4) 在 PyG 中进行消息传递：
+        #    - x=x_attn 会在 message() 中映射为 x_j，shape: [num_edges, out_channels]
+        #    - g=attn_out 会在 message() 中映射为 g_i，shape: [num_edges, out_channels]
+        out = self.propagate(edge_index, x=x_attn, g=attn_out)
+
+        # 5) 消息聚合后的更新 + 残差
+        # final: [num_nodes, out_channels]
+        return self.update_net(out) + x_attn
 
     def message(self, x_j, g_i):
         """

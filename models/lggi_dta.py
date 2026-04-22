@@ -36,24 +36,33 @@ class LGGIDTANet(torch.nn.Module):
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
 
+        # ==================== 蛋白特征适配层 (Protein Adapter) ====================
+        # 将 ESM token 维度从 protein_dim(默认320) 投影到 hidden_dim，
+        # 使其与图卷积隐空间对齐后再进入 Cross-Attention。
+        self.protein_adapter = nn.Sequential(
+            nn.Linear(protein_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        )
+
         # ==================== 药物分子图处理分支 (LGGI Layers) ====================
         # 第 1 层 LGGI：将原始原子特征 (78维) 映射到隐藏空间 (hidden_dim)，
         #              同时注入蛋白质门控信号
         self.lggi1 = LGGILayer(in_channels=num_features_xd,
                                out_channels=hidden_dim,
-                               protein_dim=protein_dim)
+                               protein_dim=hidden_dim)
         self.bn1 = nn.BatchNorm1d(hidden_dim)
 
         # 第 2 层 LGGI：在隐藏空间内继续深度交互
         self.lggi2 = LGGILayer(in_channels=hidden_dim,
                                out_channels=hidden_dim,
-                               protein_dim=protein_dim)
+                               protein_dim=hidden_dim)
         self.bn2 = nn.BatchNorm1d(hidden_dim)
 
         # 第 3 层 LGGI：最终一轮的蛋白引导信息传递
         self.lggi3 = LGGILayer(in_channels=hidden_dim,
                                out_channels=hidden_dim,
-                               protein_dim=protein_dim)
+                               protein_dim=hidden_dim)
         self.bn3 = nn.BatchNorm1d(hidden_dim)
 
         # ==================== 图级读出层 (Graph Readout) ====================
@@ -78,7 +87,7 @@ class LGGIDTANet(torch.nn.Module):
                 data.x            - 节点特征        shape: [num_nodes, 78]
                 data.edge_index   - 边索引          shape: [2, num_edges]
                 data.batch        - 节点所属图索引   shape: [num_nodes]
-                data.protein_feat - ESM 蛋白质特征   shape: [batch_size, 320]
+                data.protein_feat - ESM 蛋白质特征   shape: [batch_size, K, 320]
         
         返回:
             out: 亲和力预测值  shape: [batch_size, 1]
@@ -89,6 +98,8 @@ class LGGIDTANet(torch.nn.Module):
 
         # protein_tokens shape: [batch_size, K=32, 320] (ESM 残基级蛋白 token)
         protein_tokens = data.protein_feat
+        # 先做蛋白特征维度适配: [batch_size, K, 320] -> [batch_size, K, hidden_dim]
+        protein_tokens = self.protein_adapter(protein_tokens)
 
         # ========== 第二步：三层 LGGI 机制级融合 ==========
         # 每一层都将 protein_tokens 作为门控条件注入到图消息传递中

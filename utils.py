@@ -55,58 +55,77 @@ _esm_model = None
 _esm_tokenizer = None
 _esm_device = None
 
-# 残基级蛋白 token 数量（通过 adaptive pooling 压缩至固定长度）
-NUM_PROTEIN_TOKENS = 32
+# 统一 ESM 序列长度配置：
+# - tokenizer 最大长度至少 1000（含特殊 token），这里设为 1002 以保留 1000 个残基位点
+# - 输出静态特征默认固定为 [1000, 320]，便于离线缓存和稳定复用
+ESM_RESIDUE_MAX_LEN = 1000
+ESM_TOKENIZER_MAX_LEN = ESM_RESIDUE_MAX_LEN + 2
 
 def get_esm_embedding(sequence):
     """
-    使用预训练 ESM 提取残基级蛋白特征 (带缓存优化)
-    
-    通过 Adaptive Average Pooling 将变长的残基序列压缩为固定 K 个 token，
-    既保留了残基级的空间分辨率，又确保了 PyG Batch 拼接的维度一致性。
-    
+    使用预训练 ESM 提取残基级蛋白特征 (带缓存优化)。
+
+    设计目标：
+    1) tokenizer 的 max_length >= 1000；
+    2) 使用 no_grad 禁用反向图，降低显存压力；
+    3) 在 CPU 上完成特征截断/补零与缓存，降低 OOM 风险；
+    4) 返回静态特征矩阵，shape 为 [1000, 320]（或可截断为实际长度）。
+
     输入: sequence (str) — 原始氨基酸序列
-    输出: protein_tokens (torch.FloatTensor) shape: [1, K, 320]
-          其中 K = NUM_PROTEIN_TOKENS = 32
+    输出: protein_tokens (torch.FloatTensor) shape: [ESM_RESIDUE_MAX_LEN, 320]
     """
     global _esm_model, _esm_tokenizer, _esm_device, ESM_CACHE
     if sequence in ESM_CACHE:
         return ESM_CACHE[sequence]
-        
+
     if _esm_model is None:
         from transformers import EsmTokenizer, EsmModel
-        # 检测设备优先分配给CPU for ESM (to avoid CUDA issues)
-        _esm_device = torch.device('cpu')
+        # 设备选择：优先使用 GPU（CUDA），不可用时回退到 CPU
+        _esm_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         print(f"Loading ESM model facebook/esm2_t6_8M_UR50D to device: {_esm_device} ...")
         _esm_tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
         _esm_model = EsmModel.from_pretrained("facebook/esm2_t6_8M_UR50D").to(_esm_device)
-        _esm_model.eval() # 开启推理模式
-        
-    # 截断支持到最大1024长度
-    inputs = _esm_tokenizer(sequence, return_tensors="pt", truncation=True, max_length=1024).to(_esm_device)
-    
+        _esm_model.eval()  # 开启推理模式
+
+    # tokenizer 最大长度至少为 1000（这里使用 1002: 1000 residue + BOS/EOS）
+    inputs = _esm_tokenizer(
+        sequence,
+        return_tensors="pt",
+        truncation=True,
+        max_length=ESM_TOKENIZER_MAX_LEN
+    )
+
+    # 推理阶段禁用梯度，降低显存占用
     with torch.no_grad():
-        outputs = _esm_model(**inputs)
-        
-    # ESM 输出最后一层的隐藏状态
-    # last_hidden_state shape: [1, seq_len, hidden_dim=320]
-    last_hidden = outputs.last_hidden_state  # [1, seq_len, 320]
-    
-    # 去除 BOS/EOS 特殊 token，只保留真实残基的 embedding
-    # last_hidden[:, 1:-1, :] shape: [1, seq_len-2, 320]
-    residue_feats = last_hidden[:, 1:-1, :]
-    
-    # 解决 MPS (Apple Silicon) 会报错: Adaptive pool MPS: input sizes must be divisible by output sizes
-    # 将其转移到 CPU 进行池化
-    residue_feats_cpu = residue_feats.cpu()
-    
-    # 使用 Adaptive Average Pooling 将变长残基序列压缩到固定 K 个 token
-    # 转置: [1, seq_len-2, 320] → [1, 320, seq_len-2] (AdaptiveAvgPool1d 作用于最后一维)
-    residue_feats_t = residue_feats_cpu.transpose(1, 2)  # [1, 320, seq_len-2]
-    pooled = torch.nn.functional.adaptive_avg_pool1d(residue_feats_t, NUM_PROTEIN_TOKENS)  # [1, 320, K]
-    # 转置回来: [1, 320, K] → [1, K, 320]
-    protein_tokens = pooled.transpose(1, 2)  # 已经是 CPU 张量，shape: [1, K, 320]
-    
+        try:
+            inputs = {k: v.to(_esm_device) for k, v in inputs.items()}
+            outputs = _esm_model(**inputs)
+        except RuntimeError as e:
+            # 超长序列导致 CUDA OOM 时，自动回退到 CPU 推理
+            if 'out of memory' in str(e).lower() and _esm_device.type == 'cuda':
+                print("CUDA OOM while extracting ESM features. Falling back to CPU inference.")
+                _esm_device = torch.device('cpu')
+                _esm_model = _esm_model.to(_esm_device)
+                inputs = {k: v.to(_esm_device) for k, v in inputs.items()}
+                outputs = _esm_model(**inputs)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            else:
+                raise
+
+    # ESM 输出最后一层隐藏状态: [1, seq_len, 320]
+    # 去除 BOS/EOS，仅保留真实残基: [res_len, 320]
+    residue_feats = outputs.last_hidden_state[:, 1:-1, :].squeeze(0).detach().cpu().float()
+
+    # 固定长度静态缓存: [1000, 320]（短序列补零，超长序列截断）
+    protein_tokens = torch.zeros((ESM_RESIDUE_MAX_LEN, residue_feats.size(-1)), dtype=torch.float32)
+    valid_len = min(residue_feats.size(0), ESM_RESIDUE_MAX_LEN)
+    if valid_len > 0:
+        protein_tokens[:valid_len] = residue_feats[:valid_len]
+
+    # 主动释放中间变量，进一步降低峰值内存
+    del outputs, residue_feats, inputs
+
     # 存入全局唯一序列字典缓存
     ESM_CACHE[sequence] = protein_tokens
     return protein_tokens
@@ -176,8 +195,10 @@ class TestbedDataset(InMemoryDataset):
             target_seq = xt_seq[i]
             labels = y[i]
             
-            # 获取 ESM 特征 shape: [320]
-            protein_feat = get_esm_embedding(target_seq)
+            # 获取静态 ESM 特征并在 CPU 上保存
+            # get_esm_embedding 返回 [1000, 320]；这里扩一维为 [1, 1000, 320]，
+            # 便于 PyG Batch 后形成 [batch_size, 1000, 320]。
+            protein_feat = get_esm_embedding(target_seq).cpu().contiguous().unsqueeze(0)
             
             # convert SMILES to molecular representation using rdkit
             c_size, features, edge_index = smile_graph[smiles]
@@ -185,7 +206,7 @@ class TestbedDataset(InMemoryDataset):
             GCNData = DATA.Data(x=torch.Tensor(features),
                                 edge_index=torch.LongTensor(edge_index).transpose(1, 0),
                                 y=torch.FloatTensor([labels]),
-                                protein_feat=protein_feat) # [NEW] 植入提取出的大语言模型高维特征
+                                protein_feat=protein_feat) # [NEW] 静态蛋白特征（CPU缓存）
             GCNData.target = torch.LongTensor([target])
             GCNData.__setitem__('c_size', torch.LongTensor([c_size]))
             # append graph, label and target sequence to data list
